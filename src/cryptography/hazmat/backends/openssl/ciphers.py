@@ -6,7 +6,7 @@ from __future__ import absolute_import, division, print_function
 
 from cryptography import utils
 from cryptography.exceptions import InvalidTag, UnsupportedAlgorithm, _Reasons
-from cryptography.hazmat.backends.utils import _GCMSizeValidator
+from cryptography.hazmat.backends.utils import _SizeValidator
 from cryptography.hazmat.primitives import ciphers
 from cryptography.hazmat.primitives.ciphers import modes
 
@@ -24,7 +24,16 @@ class _CipherContext(object):
         self._mode = mode
         self._operation = operation
         self._tag = None
-        self._gcm_size_validator = _GCMSizeValidator()
+        if isinstance(mode, modes.ModeWithPlaintextBitLimit):
+            self._plaintext_size_validator = _SizeValidator(
+                max_bits=mode.plaintext_bit_limit,
+                label="%s mode plaintext" % mode.name
+            )
+        if isinstance(mode, modes.ModeWithAADBitLimit):
+            self._aad_size_validator = _SizeValidator(
+                max_bits=mode.aad_bit_limit,
+                label="%s mode AAD" % mode.name
+            )
 
         if isinstance(self._cipher, ciphers.BlockCipherAlgorithm):
             self._block_size = self._cipher.block_size
@@ -115,8 +124,9 @@ class _CipherContext(object):
         # OpenSSL does not properly handle the case when encrypting plaintext
         # in GCM mode when the byte limit of 2**39 - 256 bits is reached.
         # See #1821
-        if isinstance(self._mode, modes.GCM):
-            self._gcm_size_validator.update_and_validate_plaintext(data)
+        if isinstance(self._mode, modes.ModeWithPlaintextBitLimit):
+            self._plaintext_size_validator.update(data)
+            self._plaintext_size_validator.validate()
 
         buf = self._backend._ffi.new("unsigned char[]",
                                      len(data) + self._block_size - 1)
@@ -180,8 +190,9 @@ class _CipherContext(object):
         return self._backend._ffi.buffer(buf)[:outlen[0]]
 
     def authenticate_additional_data(self, data):
-        if isinstance(self._mode, modes.GCM):
-            self._gcm_size_validator.validate_aad(data)
+        if isinstance(self._mode, modes.ModeWithAADBitLimit):
+            self._aad_size_validator.update(data)
+            self._aad_size_validator.validate()
 
         outlen = self._backend._ffi.new("int *")
         res = self._backend._lib.EVP_CipherUpdate(
